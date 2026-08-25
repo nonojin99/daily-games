@@ -1,0 +1,12 @@
+{
+  "name": "daily-games-server",
+  "version": "1.0.0",
+  "description": "Serves daily games stored in Supabase",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
