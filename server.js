@@ -6,6 +6,7 @@ const SB_URL = process.env.SUPABASE_URL;
 const SB_KEY = process.env.SUPABASE_KEY;
 const SB_B_URL = process.env.SUPABASE_B_URL; // 짝수일 랭킹 프로젝트 (없어도 동작)
 const SB_B_KEY = process.env.SUPABASE_B_KEY;
+const STATS_KEY = process.env.STATS_KEY; // 설정 시 /stats는 관리자 전용
 const PORT = process.env.PORT || 10000;
 const TTL_MS = 60 * 1000; // 60초 캐시
 
@@ -58,7 +59,7 @@ a.card:hover{transform:translateY(-3px);border-color:#3b9bff}
 .card h2{font-size:22px;margin:6px 0 8px}
 .card .desc{font-size:13px;color:#9aa0c0;line-height:1.5}
 </style></head>
-<body><h1>DAILY GAMES</h1><p class="sub">매일 하나씩, Claude와 함께 만드는 게임 · <a class="nav" href="/stats">📊 통계</a></p>
+<body><h1>DAILY GAMES</h1><p class="sub">매일 하나씩, Claude와 함께 만드는 게임</p>
 <div class="grid">${cards || '<p class="sub">아직 게임이 없어요</p>'}</div>
 <footer>nonojin · Daily Game Project</footer></body></html>`;
 }
@@ -152,6 +153,24 @@ const server = http.createServer(async (req, res) => {
       return res.end(hubPage(games));
     }
     if (path === "/stats") {
+      // 관리자 전용: ?key=... 로 최초 접속하면 쿠키가 심어져 이후엔 /stats만으로 접근 가능
+      if (STATS_KEY) {
+        const cookies = req.headers.cookie || "";
+        const hasCookie = cookies.split(";").some((c) => c.trim() === `stats_auth=${STATS_KEY}`);
+        const keyParam = url.searchParams.get("key");
+        if (keyParam === STATS_KEY) {
+          const rows = await statsData();
+          res.writeHead(200, {
+            "Content-Type": "text/html; charset=utf-8",
+            "Set-Cookie": `stats_auth=${STATS_KEY}; Path=/; Max-Age=31536000; HttpOnly; Secure; SameSite=Lax`,
+          });
+          return res.end(statsPage(rows));
+        }
+        if (!hasCookie) {
+          res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+          return res.end("Not Found");
+        }
+      }
       const rows = await statsData();
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
       return res.end(statsPage(rows));
