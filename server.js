@@ -9,6 +9,8 @@ const SB_B_KEY = process.env.SUPABASE_B_KEY;
 const STATS_KEY = process.env.STATS_KEY; // 설정 시 /stats는 관리자 전용
 const PORT = process.env.PORT || 10000;
 const TTL_MS = 60 * 1000; // 60초 캐시
+const THUMB_TTL = 6 * 60 * 60 * 1000; // 썸네일 디코드 결과 6시간 메모리 캐시
+const thumbCache = new Map(); // slug -> { buf, at }
 
 const cache = new Map();
 async function sbFetch(base, key, path, opts = {}) {
@@ -118,25 +120,38 @@ p.sub{color:#9aa0c0;margin:10px 0 36px;font-size:14px;text-align:center}
 a.nav{color:#3b9bff;text-decoration:none;font-size:13px}
 footer{margin-top:40px;font-size:12px;color:#4a5078}`;
 
-function hubPage(games) {
+function hubPage(games, thumbSet = new Set()) {
   const newestDay = Math.max(...games.map((g) => Number(g.day) || 0));
   const cards = games
-    .map(
-      (g) => `
-    <a class="card${Number(g.day) === newestDay ? ' new' : ''}" href="/games/${esc(g.slug)}/">
-      <div class="day">${Number(g.day) === newestDay ? '<span class="badge">오늘의 신작</span> ' : ''}DAY ${g.day} · ${esc(g.published_on)}</div>
-      <h2>${esc(g.emoji || "🎮")} ${esc(g.title)}</h2>
-      <div class="desc">${esc(g.description)}</div>
-    </a>`
-    )
+    .map((g) => {
+      const isNew = Number(g.day) === newestDay;
+      // 게임 화면 배너 (game_thumbs에 있는 게임만). 없으면 이모지 폴백
+      const banner = thumbSet.has(g.slug)
+        ? `<img class="shot" src="/thumb/${esc(g.slug)}.webp" width="720" height="405" alt="${esc(g.title)} 게임 화면" loading="lazy" decoding="async">`
+        : `<div class="shot noshot">${esc(g.emoji || "🎮")}</div>`;
+      return `
+    <a class="card${isNew ? ' new' : ''}" href="/games/${esc(g.slug)}/">
+      ${banner}
+      <div class="body">
+        <div class="day">${isNew ? '<span class="badge">오늘의 신작</span> ' : ''}DAY ${g.day} · ${esc(g.published_on)}</div>
+        <h2>${esc(g.title)}</h2>
+        <div class="desc">${esc(g.description)}</div>
+      </div>
+    </a>`;
+    })
     .join("");
   return `<!DOCTYPE html>
 <html lang="ko"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Daily Games</title>
 <style>${SHELL_CSS}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px;width:min(920px,100%)}
-a.card{display:block;background:#12152b;border:1px solid #23284a;border-radius:18px;padding:22px;text-decoration:none;color:#fff;transition:transform .12s,border-color .12s}
+a.card{display:block;background:#12152b;border:1px solid #23284a;border-radius:18px;overflow:hidden;text-decoration:none;color:#fff;transition:transform .12s,border-color .12s}
 a.card:hover{transform:translateY(-3px);border-color:#3b9bff}
+a.card .shot{display:block;width:100%;height:auto;aspect-ratio:16/9;object-fit:cover;background:#0b0e1c;border-bottom:1px solid #23284a}
+a.card .noshot{display:flex;align-items:center;justify-content:center;font-size:54px;line-height:1}
+a.card .body{padding:18px 22px 22px}
+a.card.new .shot{border-bottom-color:#3b9bff}
+@media (prefers-reduced-motion:reduce){a.card{transition:none}}
 .card .day{font-size:12px;color:#6f76a8;letter-spacing:1px}
 .card h2{font-size:22px;margin:6px 0 8px}
 .card .desc{font-size:13px;color:#9aa0c0;line-height:1.5}
@@ -234,8 +249,30 @@ const server = http.createServer(async (req, res) => {
     }
     if (path === "/") {
       const games = await sb("games?select=slug,title,day,description,emoji,published_on&order=day.desc");
+      // 썸네일이 있는 게임만 배너를 그린다 (없으면 기존 이모지 카드 그대로)
+      let thumbSet = new Set();
+      try { const t = await sb("game_thumbs?select=slug"); thumbSet = new Set((t || []).map((r) => r.slug)); } catch (e) {}
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-      return res.end(hubPage(games));
+      return res.end(hubPage(games, thumbSet));
+    }
+    // 게임 화면 썸네일: /thumb/<slug>.webp — game_thumbs 의 base64 720x405 WebP 를 디코드해 서빙 (6시간 메모리 캐시)
+    const tm = path.match(/^\/thumb\/([a-z0-9-]{1,50})\.webp$/);
+    if (tm) {
+      const slug = tm[1];
+      try {
+        const hit = thumbCache.get(slug);
+        let buf = hit && Date.now() - hit.at < THUMB_TTL ? hit.buf : null;
+        if (!buf) {
+          const rows = await sb(`game_thumbs?slug=eq.${slug}&select=webp&limit=1`);
+          if (!rows || !rows.length) { res.writeHead(404, { "Content-Type": "text/plain" }); return res.end("no thumb"); }
+          buf = Buffer.from(rows[0].webp, "base64");
+          thumbCache.set(slug, { buf, at: Date.now() });
+        }
+        res.writeHead(200, { "Content-Type": "image/webp", "Content-Length": buf.length, "Cache-Control": "public, max-age=86400" });
+        return res.end(buf);
+      } catch (e) {
+        res.writeHead(502, { "Content-Type": "text/plain" }); return res.end("thumb error");
+      }
     }
     if (path === "/stats") {
       // 관리자 전용: ?key=... 로 최초 접속하면 쿠키가 심어져 이후엔 /stats만으로 접근 가능
